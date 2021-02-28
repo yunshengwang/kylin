@@ -2163,6 +2163,10 @@ public abstract class KylinConfigBase implements Serializable {
         return getOptional("kylin.server.host-address", "localhost:7070");
     }
 
+    public boolean getServerSelfDiscoveryEnabled() {
+        return Boolean.parseBoolean(getOptional("kylin.server.self-discovery-enabled", FALSE));
+    }
+
     public String getClusterName() {
         String key = "kylin.server.cluster-name";
         String clusterName = this.getOptional(key, getMetadataUrlPrefix());
@@ -2349,18 +2353,26 @@ public abstract class KylinConfigBase implements Serializable {
                 + getKylinMetricsSubjectSuffix();
     }
 
-    public String getKylinMetricsSubjectQuery() {
-        return getOptional("kylin.metrics.subject-query", "METRICS_QUERY") + "_" + getKylinMetricsSubjectSuffix();
+    public String getKylinMetricsSubjectQueryExecution() {
+        return getOptional("kylin.metrics.subject-query-execution", "METRICS_QUERY_EXECUTION") + "_" + getKylinMetricsSubjectSuffix();
     }
 
-    public String getKylinMetricsSubjectQueryCube() {
-        return getOptional("kylin.metrics.subject-query-cube", "METRICS_QUERY_CUBE") + "_"
+    public String getKylinMetricsSubjectQuerySparkJob() {
+        return getOptional("kylin.metrics.subject-query-spark-job", "METRICS_QUERY_SPARK_JOB") + "_"
                 + getKylinMetricsSubjectSuffix();
     }
 
-    public String getKylinMetricsSubjectQueryRpcCall() {
-        return getOptional("kylin.metrics.subject-query-rpc", "METRICS_QUERY_RPC") + "_"
+    public String getKylinMetricsSubjectQuerySparkStage() {
+        return getOptional("kylin.metrics.subject-query-spark-stage", "METRICS_QUERY_SPARK_STAGE") + "_"
                 + getKylinMetricsSubjectSuffix();
+    }
+
+    public int getKylinMetricsCacheExpireSeconds() {
+        return Integer.parseInt(this.getOptional("kylin.metrics.query-cache.expire-seconds", "300"));
+    }
+
+    public int getKylinMetricsCacheMaxEntries() {
+        return Integer.parseInt(this.getOptional("kylin.metrics.query-cache.max-entries", "10000"));
     }
 
     public Map<String, String> getKylinMetricsConf() {
@@ -2875,22 +2887,36 @@ public abstract class KylinConfigBase implements Serializable {
 
     private String getLogPropertyFile(String filename) {
         if (isDevEnv()) {
-            return Paths.get(getKylinHomeWithoutWarn(), "build", "conf").toString() + File.separator + filename;
+            return Paths.get(getKylinHomeWithoutWarn(),
+                    "build", "conf").toString() + File.separator + filename;
         } else {
-            return Paths.get(getKylinHomeWithoutWarn(), "conf").toString() + File.separator + filename;
+            return Paths.get(getKylinHomeWithoutWarn(),
+                    "conf").toString() + File.separator + filename;
         }
     }
 
     public int getQueryPartitionSplitSizeMB() {
-        return Integer.parseInt(getOptional("kylin.query.spark-engine.partition-split-size-mb", "64"));
+        return Integer.parseInt(getOptional("kylin.query.spark-engine.partition-split-size-mb",
+                "64"));
+    }
+
+    /**
+     * The max size in mb handled per task when using shard by column,
+     * if the sharding size exceeds this value, it will fall back to non-sharding read RDD
+     */
+    public int getMaxShardingSizeMBPerTask() {
+        return Integer.parseInt(getOptional("kylin.query.spark-engine.max-sharding-size-mb",
+                "64"));
     }
 
     public boolean isShardingJoinOptEnabled() {
-        return Boolean.parseBoolean(getOptional("kylin.query.spark-engine.expose-sharding-trait", "true"));
+        return Boolean.parseBoolean(getOptional("kylin.query.spark-engine.expose-sharding-trait",
+                "true"));
     }
 
     public int getSparkSqlShufflePartitions() {
-        return Integer.parseInt(getOptional("kylin.query.spark-engine.spark-sql-shuffle-partitions", "-1"));
+        return Integer.parseInt(getOptional("kylin.query.spark-engine.spark-sql-shuffle-partitions",
+                "-1"));
     }
 
     public Map<String, String> getQuerySparkConf() {
@@ -2910,20 +2936,32 @@ public abstract class KylinConfigBase implements Serializable {
 
     /**
      * Used to upload user-defined log4j configuration
+     *
+     * @param isLocal run spark local mode or not
      */
-    public String sparkUploadFiles() {
+    public String sparkUploadFiles(boolean isLocal) {
         try {
-            File storageFile = FileUtils.findFile(KylinConfigBase.getKylinHome() + "/conf",
-                    "spark-executor-log4j.properties");
             String path1 = "";
-            if (storageFile != null) {
-                path1 = storageFile.getCanonicalPath();
+            if (!isLocal) {
+                File storageFile = FileUtils.findFile(KylinConfigBase.getKylinHome() + "/conf",
+                        "spark-executor-log4j.properties");
+                if (storageFile != null) {
+                    path1 = storageFile.getCanonicalPath();
+
+                }
             }
 
             return getOptional("kylin.query.engine.sparder-additional-files", path1);
         } catch (IOException e) {
             return "";
         }
+    }
+
+    /**
+     * Used to upload user-defined log4j configuration
+     */
+    public String sparkUploadFiles() {
+        return sparkUploadFiles(false);
     }
 
     @ConfigTag(ConfigTag.Tag.NOT_CLEAR)

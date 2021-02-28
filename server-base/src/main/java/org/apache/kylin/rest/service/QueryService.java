@@ -68,6 +68,7 @@ import org.apache.kylin.cache.cachemanager.MemcachedCacheManager;
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.QueryContext;
 import org.apache.kylin.common.QueryContextFacade;
+import org.apache.kylin.metrics.QuerySparkMetrics;
 import org.apache.kylin.common.debug.BackdoorToggles;
 import org.apache.kylin.common.exceptions.ResourceLimitExceededException;
 import org.apache.kylin.common.persistence.ResourceStore;
@@ -76,6 +77,7 @@ import org.apache.kylin.common.persistence.Serializer;
 import org.apache.kylin.common.util.DBUtils;
 import org.apache.kylin.common.util.JsonUtil;
 import org.apache.kylin.common.util.Pair;
+import org.apache.kylin.common.util.ServerMode;
 import org.apache.kylin.common.util.SetThreadName;
 import org.apache.kylin.common.util.StringUtil;
 import org.apache.kylin.cube.CubeInstance;
@@ -120,6 +122,7 @@ import org.apache.kylin.rest.util.SQLResponseSignatureUtil;
 import org.apache.kylin.rest.util.TableauInterceptor;
 import org.apache.kylin.storage.hybrid.HybridInstance;
 import org.apache.kylin.storage.hybrid.HybridManager;
+import org.apache.spark.sql.SparderContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -406,10 +409,9 @@ public class QueryService extends BasicService {
         sqlRequest.setUsername(getUserName());
 
         KylinConfig kylinConfig = KylinConfig.getInstanceFromEnv();
-        String serverMode = kylinConfig.getServerMode();
-        if (!(Constant.SERVER_MODE_QUERY.equals(serverMode.toLowerCase(Locale.ROOT))
-                || Constant.SERVER_MODE_ALL.equals(serverMode.toLowerCase(Locale.ROOT)))) {
-            throw new BadRequestException(String.format(Locale.ROOT, msg.getQUERY_NOT_ALLOWED(), serverMode));
+        if (!ServerMode.SERVER_MODE.canServeQuery()) {
+            throw new BadRequestException(
+                    String.format(Locale.ROOT, msg.getQUERY_NOT_ALLOWED(), kylinConfig.getServerMode()));
         }
         if (StringUtils.isBlank(sqlRequest.getProject())) {
             throw new BadRequestException(msg.getEMPTY_PROJECT_NAME());
@@ -468,9 +470,14 @@ public class QueryService extends BasicService {
             }
 
             sqlResponse.setDuration(queryContext.getAccumulatedMillis());
+            if (QuerySparkMetrics.getInstance().getQueryExecutionMetrics(queryContext.getQueryId()) != null) {
+                String sqlTraceUrl = SparderContext.appMasterTrackURL() + "/SQL/execution/?id=" +
+                        QuerySparkMetrics.getInstance().getQueryExecutionMetrics(queryContext.getQueryId()).getExecutionId();
+                sqlResponse.setTraceUrl(sqlTraceUrl);
+            }
             logQuery(queryContext.getQueryId(), sqlRequest, sqlResponse);
             try {
-                recordMetric(sqlRequest, sqlResponse);
+                recordMetric(queryContext.getQueryId(), sqlRequest, sqlResponse);
             } catch (Throwable th) {
                 logger.warn("Write metric error.", th);
             }
@@ -585,8 +592,8 @@ public class QueryService extends BasicService {
                 checkCondition(!BackdoorToggles.getDisableCache(), "query cache disabled in BackdoorToggles");
     }
 
-    protected void recordMetric(SQLRequest sqlRequest, SQLResponse sqlResponse) throws UnknownHostException {
-        QueryMetricsFacade.updateMetrics(sqlRequest, sqlResponse);
+    protected void recordMetric(String queryId, SQLRequest sqlRequest, SQLResponse sqlResponse) throws UnknownHostException {
+        QueryMetricsFacade.updateMetrics(queryId, sqlRequest, sqlResponse);
         QueryMetrics2Facade.updateMetrics(sqlRequest, sqlResponse);
     }
 
@@ -1173,6 +1180,7 @@ public class QueryService extends BasicService {
         List<String> realizations = Lists.newLinkedList();
         StringBuilder cubeSb = new StringBuilder();
         StringBuilder cuboidIdsSb = new StringBuilder();
+        StringBuilder realizationTypeSb = new StringBuilder();
         StringBuilder logSb = new StringBuilder("Processed rows for each storageContext: ");
         QueryContext queryContext = QueryContextFacade.current();
         if (OLAPContext.getThreadLocalContexts() != null) { // contexts can be null in case of 'explain plan for'
@@ -1184,6 +1192,7 @@ public class QueryService extends BasicService {
                     if (cubeSb.length() > 0) {
                         cubeSb.append(",");
                     }
+                    cubeSb.append(ctx.realization.getCanonicalName());
                     Cuboid cuboid = ctx.storageContext.getCuboid();
                     if (cuboid != null) {
                         //Some queries do not involve cuboid, e.g. lookup table query
@@ -1192,24 +1201,25 @@ public class QueryService extends BasicService {
                         }
                         cuboidIdsSb.append(cuboid.getId());
                     }
-                    cubeSb.append(ctx.realization.getCanonicalName());
                     logSb.append(ctx.storageContext.getProcessedRowCount()).append(" ");
 
                     realizationName = ctx.realization.getName();
                     realizationType = ctx.realization.getStorageType();
+                    if (realizationTypeSb.length() > 0) {
+                        realizationTypeSb.append(",");
+                    }
+                    realizationTypeSb.append(realizationType);
 
                     realizations.add(realizationName);
                 }
-                queryContext.setContextRealization(ctx.id, realizationName, realizationType);
             }
-
-
         }
         logger.info(logSb.toString());
 
         SQLResponse response = new SQLResponse(columnMetas, results, cubeSb.toString(), 0, isException,
                 exceptionMessage, isPartialResult, isPushDown);
         response.setCuboidIds(cuboidIdsSb.toString());
+        response.setRealizationTypes(realizationTypeSb.toString());
         response.setTotalScanCount(queryContext.getScannedRows());
         response.setTotalScanFiles((queryContext.getScanFiles() < 0) ? -1 :
                 queryContext.getScanFiles());
